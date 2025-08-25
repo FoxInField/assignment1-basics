@@ -1,6 +1,6 @@
 import os
 import regex as re
-from typing import BinaryIO, Tuple, Set, DefaultDict, List, Dict
+from typing import BinaryIO, Tuple, Set, List, Dict, Iterable, Iterator
 from collections import defaultdict
 
 def split_by_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
@@ -176,3 +176,106 @@ def train_bpe(
         pretokens = update_pretokens(counts, index_dict, pretokens, index1, index2, new_index)
 
     return (vocab, merges)
+
+class BPETokenizer:
+    def __init__(self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None):
+
+        self.id_to_token = dict(vocab)
+        self.token_to_id = {v: k for k, v in vocab.items()}
+        self.special_tokens = set(special_tokens or [])
+        self.merge_dict_tuple = {(self.token_to_id[a], self.token_to_id[b]): i for i, (a, b) in enumerate(merges)}
+
+    def pretokenize(self, parts: list[str], drop_special_token: bool = False) -> List[List[int]]:
+        """
+        Convert text parts into pretokens (list of list of ints)
+        Special tokens are mapped to their vocab ID directly.
+        """
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        pretokens: List[List[int]] = []
+
+        for part in parts:
+            if part in self.special_tokens:
+                if not drop_special_token:
+                    # 直接用特殊 token 的 ID
+                    pretokens.append([self.token_to_id[part.encode("utf-8")]])
+            else:
+                str_tokens = re.findall(PAT, part)
+                for s in str_tokens:
+                    pretokens.append([self.token_to_id[bytes([b])] for b in s.encode("utf-8")])
+
+        return pretokens
+    
+    def atom_token_to_id(self, atom: list[int]) -> list[int]:
+        """
+        将 atom (字节或字符的 ID 列表) 通过 BPE 规则不断合并成最终 token ID 列表
+        """
+        if len(atom) < 2: 
+            return atom
+        while True:
+            merge_idx = None
+            min_rank = float('inf')
+            new_id = None
+
+            # 遍历找最小 rank 的 pair
+            for idx in range(len(atom) - 1):
+                pair = (atom[idx], atom[idx + 1])
+                if pair in self.merge_dict_tuple:
+                    rank = self.merge_dict_tuple[pair]
+                    if rank < min_rank:
+                        min_rank = rank
+                        new_id = self.token_to_id[self.id_to_token[pair[0]] + self.id_to_token[pair[1]]]
+                        merge_idx = idx
+
+            # 如果找不到可合并的 pair，则退出
+            if merge_idx is None:
+                break
+
+            # 执行合并：用 new_id 替换掉 atom[merge_idx], atom[merge_idx+1]
+            atom = atom[:merge_idx] + [new_id] + atom[merge_idx+2:]
+
+        return atom
+
+    def encode(self, text: str) -> list[int]:
+        split_text = split_by_special_tokens(text, self.special_tokens)
+        token_id_list: list[list[int]] = self.pretokenize(split_text)
+        
+        token_ids: list[int] = []
+        for atom in token_id_list:
+            # atom 是 list[int]，BPE 合并
+            token_ids.extend(self.atom_token_to_id(atom))
+
+        return token_ids
+
+    def decode(self, token_ids: list[int]) -> str:
+        """
+        Decode a sequence of token IDs into text.
+        对超出 vocab 范围的 token 使用 Unicode Replacement Character (U+FFFD)。
+        """
+        tokens = bytes()
+        vocab_size = len(self.id_to_token)
+        replacement_char = "\uFFFD"  # Unicode replacement character
+
+        for token_id in token_ids:
+            if token_id < vocab_size:
+                token = self.id_to_token[token_id]  # bytes
+            else:
+                # 对超出范围的 token 使用 replacement char
+                token = replacement_char.encode('utf-8')
+
+            tokens += token
+
+        decoded_text = tokens.decode('utf-8', errors='replace')
+        return decoded_text
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        """Given an iterable of strings (e.g., a Python file handle), 
+        return a generator that lazily yields token IDs. 
+        This is required for memory-eﬀicient tokenization of large files 
+        that we cannot directly load into memory.
+        """
+        for line in iterable:
+            for idx in self.encode(line):
+                yield idx
