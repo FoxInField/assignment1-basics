@@ -2,6 +2,7 @@ import os
 import regex as re
 from typing import BinaryIO, Tuple, Set, List, Dict, Iterable, Iterator
 from collections import defaultdict
+import json
 
 def split_by_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
     """
@@ -187,6 +188,7 @@ class BPETokenizer:
         self.token_to_id = {v: k for k, v in vocab.items()}
         self.special_tokens = set(special_tokens or [])
         self.merge_dict_tuple = {(self.token_to_id[a], self.token_to_id[b]): i for i, (a, b) in enumerate(merges)}
+        self.merges = merges
 
     def pretokenize(self, parts: list[str], drop_special_token: bool = False) -> List[List[int]]:
         """
@@ -279,3 +281,41 @@ class BPETokenizer:
         for line in iterable:
             for idx in self.encode(line):
                 yield idx
+    
+    def save(self, file_path: str) -> None:
+        """
+        Save the tokenizer's vocabulary, merges, and special tokens to a JSON file.
+        """
+        # 保存 vocab: int -> str
+        vocab_serializable = {str(k): v.decode('utf-8', errors='replace') for k, v in self.id_to_token.items()}
+        
+        # 保存 merges: tuple[bytes, bytes] -> tuple[str, str]
+        merges_serializable = [(a.decode('utf-8', errors='replace'), b.decode('utf-8', errors='replace')) 
+                               for a, b in self.merges]
+        
+        data = {
+            'vocab': vocab_serializable,
+            'merges': merges_serializable,
+            'special_tokens': list(self.special_tokens)
+        }
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def load(cls, file_path: str) -> 'BPETokenizer':
+        """
+        Load a tokenizer from a JSON file.
+        """
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 将 vocab 字符串转回 bytes
+        vocab = {int(k): v.encode('utf-8') for k, v in data['vocab'].items()}
+        
+        # 将 merges 字符串转回 bytes
+        merges = [(a.encode('utf-8'), b.encode('utf-8')) for a, b in data['merges']]
+        
+        special_tokens = data.get('special_tokens', [])
+        
+        return cls(vocab=vocab, merges=merges, special_tokens=special_tokens)
