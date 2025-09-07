@@ -20,92 +20,123 @@ def split_by_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
         parts = re.split('(' + pattern + ')', text)
     return parts
 
-def pretokenize(parts: list[str], special_tokens: list[str], special_token_to_id: dict[str, int], drop_special_token: bool = False) -> List[List[int]]:
+def pretokenize(
+    parts: List[str], 
+    special_tokens: List[str], 
+    special_token_to_id: Dict[str, int], 
+    drop_special_token: bool = False) -> Dict[Tuple[int, ...], int]:
     """
-    Convert text parts into pretokens (list of list of ints)
+    Convert text parts into pretokens and count their frequencies.
     Special tokens are mapped to their vocab ID directly.
     """
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    pretokens: List[List[int]] = []
-
+    pretokens_freq: Dict[Tuple[int, ...], int] = {}
+    
     for part in parts:
         if part in special_tokens:
             if not drop_special_token:
-                # 直接用特殊 token 的 ID
-                pretokens.append([special_token_to_id[part]])
+                # 创建包含特殊token ID的元组
+                token_tuple = (special_token_to_id[part],)
+                # 更新频率计数
+                pretokens_freq[token_tuple] = pretokens_freq.get(token_tuple, 0) + 1
         else:
+            # 使用正则表达式分割文本
             str_tokens = re.findall(PAT, part)
             for s in str_tokens:
-                pretokens.append([b for b in s.encode('utf-8')])
+                # 将字符串转换为字节，然后转换为整数元组
+                byte_tokens = tuple(b for b in s.encode('utf-8'))
+                # 更新频率计数
+                pretokens_freq[byte_tokens] = pretokens_freq.get(byte_tokens, 0) + 1
+    
+    return pretokens_freq
 
-    return pretokens
-
-def count_pairs(pretokens: List[List[int]]) -> Tuple[dict[Tuple[bytes, bytes], int], dict[Tuple[bytes, bytes], set]]:
+def count_pairs(pretokens_freq: Dict[Tuple[int, ...], int]) -> Tuple[Dict[Tuple[int, int], int], Dict[Tuple[int, int], Set[Tuple[int, ...]]]]:
     counts = defaultdict(int)
-    index_dict = defaultdict(set)  # Store pretoken location for each pair
-
-    for j, pretoken in enumerate(pretokens):
-        for index1, index2 in zip(pretoken, pretoken[1:]):
-            counts[index1, index2] += 1
-            index_dict[index1, index2].add(j)
-    return counts, index_dict
+    index_dict = defaultdict(set)
+    
+    for pretoken_key, frequency in pretokens_freq.items():
+        # 直接遍历整数元组，统计相邻整数对
+        for i in range(len(pretoken_key) - 1):
+            pair = (pretoken_key[i], pretoken_key[i + 1])
+            counts[pair] += frequency
+            index_dict[pair].add(pretoken_key)
+    
+    return dict(counts), dict(index_dict)
 
 def update_pretokens(
     counts: Dict[Tuple[int, int], int],
-    index_dict: Dict[Tuple[int, int], Set[int]],
-    pretokens: List[List[int]],
+    index_dict: Dict[Tuple[int, int], Set[Tuple[int, ...]]],
+    pretokens_freq: Dict[Tuple[int, ...], int],
     index1: int,
     index2: int,
     new_index: int
-):
+) -> Dict[Tuple[int, ...], int]:
     """
     用 new_index 替换所有 (index1,index2) 对，并同步更新 counts 和 index_dict。
+    返回更新后的 pretokens_freq 字典。
     """
+    # 将整数索引转换为字节对
     pair = (index1, index2)
+    
     if pair not in index_dict:
-        return pretokens
+        return pretokens_freq
 
-    affected_sequences = list(index_dict[pair])
-
-    for seq_idx in affected_sequences:
-        if seq_idx >= len(pretokens):
+    # 获取包含该字节对的所有pretoken键
+    affected_pretoken_keys = list(index_dict[pair])
+    
+    # 创建更新后的pretokens_freq字典
+    updated_pretokens_freq = pretokens_freq.copy()
+    
+    for pretoken_key in affected_pretoken_keys:
+        if pretoken_key not in updated_pretokens_freq:
             continue
+            
+        frequency = updated_pretokens_freq[pretoken_key]
+        
+        # ---- 第一步：先移除该pretoken所有pair的计数和索引 ----
+        pretoken = tuple(b for b in pretoken_key)
+        for i in range(len(pretoken) - 1):
+            p = (pretoken[i], pretoken[i + 1])
+            if p in counts:
+                counts[p] = counts.get(p, 0) - frequency
+                if counts[p] <= 0:
+                    counts.pop(p, None)
+                    index_dict.pop(p, None)
+                else:
+                    index_dict[p].discard(pretoken_key)
 
-        seq = pretokens[seq_idx]
-
-        # ---- 第一步：先移除该序列所有 pair 的计数和索引 ----
-        for i in range(len(seq) - 1):
-            p = (seq[i], seq[i + 1])
-            counts[p] = counts.get(p, 0) - 1
-            if counts[p] <= 0:
-                counts.pop(p, None)
-                index_dict.pop(p, None)
-            else:
-                index_dict[p].discard(seq_idx)
-
-        # ---- 第二步：在当前序列中执行合并 ----
+        # ---- 第二步：在当前pretoken中执行合并 ----
+        int_pretoken = list(pretoken_key)
         i = 0
-        new_seq = []
-        while i < len(seq):
-            if i < len(seq) - 1 and seq[i] == index1 and seq[i + 1] == index2:
-                new_seq.append(new_index)
+        new_pretoken = []
+        while i < len(int_pretoken):
+            if i < len(int_pretoken) - 1 and int_pretoken[i] == index1 and int_pretoken[i + 1] == index2:
+                new_pretoken.append(new_index)
                 i += 2  # 跳过下一个
             else:
-                new_seq.append(seq[i])
+                new_pretoken.append(int_pretoken[i])
                 i += 1
-        pretokens[seq_idx] = new_seq
+        
+        new_pretoken_key = tuple(new_pretoken)
+        
+        # 更新pretokens_freq
+        updated_pretokens_freq.pop(pretoken_key, None)
+        if new_pretoken_key:  # 避免空序列
+            updated_pretokens_freq[new_pretoken_key] = updated_pretokens_freq.get(new_pretoken_key, 0) + frequency
 
-        # ---- 第三步：重新添加该序列的新 pair 到 counts 和 index_dict ----
-        for i in range(len(new_seq) - 1):
-            p = (new_seq[i], new_seq[i + 1])
-            counts[p] = counts.get(p, 0) + 1
-            index_dict.setdefault(p, set()).add(seq_idx)
+        # ---- 第三步：重新添加新pretoken的pair到counts和index_dict ----
+        if new_pretoken_key:
+            new_pretoken = tuple(b for b in new_pretoken_key)
+            for i in range(len(new_pretoken) - 1):
+                p = (new_pretoken[i], new_pretoken[i + 1])
+                counts[p] = counts.get(p, 0) + frequency
+                index_dict.setdefault(p, set()).add(new_pretoken_key)
 
-    # ---- 删除被合并 pair 的记录 ----
+    # ---- 删除被合并pair的记录 ----
     counts.pop(pair, None)
     index_dict.pop(pair, None)
 
-    return pretokens
+    return updated_pretokens_freq
 
 def train_bpe(
     input_path: str | os.PathLike,
@@ -150,7 +181,8 @@ def train_bpe(
 
     parts = split_by_special_tokens(content, special_tokens)
 
-    pretokens: List[List[int]] = []
+    # pretokens: List[List[int]] = []
+    pretokens: Dict[Tuple[int, ...], int] = []
     pretokens = pretokenize(parts, special_tokens, special_token_to_id, drop_special_token=False)
 
     # Merging
