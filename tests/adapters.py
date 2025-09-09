@@ -17,7 +17,7 @@ from cs336_basics.RMSNorm import RMSNorm
 from cs336_basics.Embedding import Embedding
 from cs336_basics.SwiGLU_FFN import SwiGLU_FFN, silu
 from cs336_basics.attention import MultiHeadSelfAttention, rope, MultiHeadSelfAttentionWithRoPE, scaled_dot_product_attention
-from cs336_basics.model import transformer_block, transformer_lm
+from cs336_basics.model import TransformerBlock, TransformerLM
 from cs336_basics.Optimizer import AdamW, get_lr_cosine_schedule
 from cs336_basics.Checkpointing import load_checkpoint, save_checkpoint
 
@@ -301,9 +301,25 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    return transformer_block(
-        d_model, num_heads, d_ff, max_seq_len, theta, weights, in_features
+    trans_block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_seq_len=max_seq_len,
+        theta=theta
     )
+    trans_block.load_state_dict({
+        "attention.q_proj_weight": weights["attn.q_proj.weight"],
+        "attention.k_proj_weight": weights["attn.k_proj.weight"],
+        "attention.v_proj_weight": weights["attn.v_proj.weight"],
+        "attention.o_proj_weight": weights["attn.output_proj.weight"],
+        "norm1.weight": weights["ln1.weight"],
+        "ffn.w1.weights": weights["ffn.w1.weight"],
+        "ffn.w2.weights": weights["ffn.w2.weight"],
+        "ffn.w3.weights": weights["ffn.w3.weight"],
+        "norm2.weight": weights["ln2.weight"],
+    })
+    return trans_block(in_features)
 
 
 def run_transformer_lm(
@@ -385,8 +401,45 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    return transformer_lm(vocab_size, context_length, d_model,
-        num_layers, num_heads,d_ff, rope_theta, weights, in_indices)
+    transform_lm = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta,
+        # device="cuda:0"
+    )
+    # 创建状态字典
+    state_dict = {}
+    
+    # 添加嵌入层权重
+    state_dict["token_embedding.weights"] = weights["token_embeddings.weight"]
+    state_dict["ln_final.weight"] = weights["ln_final.weight"]
+    state_dict["output_embedding.weights"] = weights["lm_head.weight"]
+    
+    # 为每一层添加权重
+    for i in range(num_layers):
+        # 注意力层权重
+        state_dict[f"layers.{i}.attention.q_proj_weight"] = weights[f"layers.{i}.attn.q_proj.weight"]
+        state_dict[f"layers.{i}.attention.k_proj_weight"] = weights[f"layers.{i}.attn.k_proj.weight"]
+        state_dict[f"layers.{i}.attention.v_proj_weight"] = weights[f"layers.{i}.attn.v_proj.weight"]
+        state_dict[f"layers.{i}.attention.o_proj_weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
+        
+        # 层归一化权重
+        state_dict[f"layers.{i}.norm1.weight"] = weights[f"layers.{i}.ln1.weight"]
+        state_dict[f"layers.{i}.norm2.weight"] = weights[f"layers.{i}.ln2.weight"]
+        
+        # 前馈网络权重
+        state_dict[f"layers.{i}.ffn.w1.weights"] = weights[f"layers.{i}.ffn.w1.weight"]
+        state_dict[f"layers.{i}.ffn.w2.weights"] = weights[f"layers.{i}.ffn.w2.weight"]
+        state_dict[f"layers.{i}.ffn.w3.weights"] = weights[f"layers.{i}.ffn.w3.weight"]
+    
+    # 加载权重到模型
+    transform_lm.load_state_dict(state_dict, strict=True)
+    
+    return transform_lm(in_indices)
 
 
 def run_rmsnorm(

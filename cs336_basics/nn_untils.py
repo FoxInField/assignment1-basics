@@ -2,6 +2,7 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor
 from typing import Iterable, Iterator
+from einops import einsum, rearrange
 
 def softmax(in_features: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
     """
@@ -35,14 +36,31 @@ def cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    max_vals = torch.amax(inputs, dim=-1, keepdim=True)
-    shifted = inputs - max_vals
+    # max_vals = torch.amax(inputs, dim=-1, keepdim=True)
+    # shifted = inputs - max_vals
 
-    log_sum_exp = torch.log(torch.sum(torch.exp(shifted), dim=-1))
-    correct_logit = shifted[torch.arange(inputs.shape[0]), targets]
+    # log_sum_exp = torch.log(torch.sum(torch.exp(shifted), dim=-1))
+    # correct_logit = shifted[torch.arange(inputs.shape[0]), targets]
 
-    ce = -correct_logit + log_sum_exp
-    return ce.mean()
+    # ce = -correct_logit + log_sum_exp
+    # return ce.mean()
+    # 原式：-log{ softmax(inputs)[targets] } 
+    # 拆开softmax并化简：-logits[targets] + log(sum(exp(inputs)))
+    
+    # 对多维度输入reshape
+    inputs_reshaped = rearrange(inputs, "b ... v -> (b ...) v")  # (batch_size, vocab_size)
+    targets_reshaped = rearrange(targets, "b ... -> (b ...)")  # (batch_size,)
+
+    # 对logits预处理，减去每个样本中的最大logit，防止上溢
+    inputs_stable = inputs_reshaped - inputs_reshaped.max(dim=-1, keepdim=True).values
+
+    # 计算交叉熵
+    targets_logit = inputs_stable.gather(1, targets_reshaped.unsqueeze(1)).squeeze(1)
+    log_sum_exp = torch.log(torch.sum(torch.exp(inputs_stable), dim=-1))
+    loss = -targets_logit + log_sum_exp
+    # 平均交叉熵
+    return loss.mean()
+
 
 def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.

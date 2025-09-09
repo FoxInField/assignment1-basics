@@ -78,7 +78,7 @@ def rope(
     return out
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, device=None, dtype=None):
+    def __init__(self, d_model: int, num_heads: int, device: torch.device | None = None, dtype=None):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
@@ -124,70 +124,12 @@ class MultiHeadSelfAttention(nn.Module):
 
         return out
 
-import torch
-from torch import nn
-from einops import rearrange
-from .nn_untils import softmax  # 你自己写的 softmax
-from jaxtyping import Float, Int
-
-def scaled_dot_product_attention(
-    Q: torch.Tensor,  # (..., queries, d_k)
-    K: torch.Tensor,  # (..., keys, d_k)
-    V: torch.Tensor,  # (..., values, d_v)
-    mask: torch.Tensor | None = None  # (..., queries, keys)
-) -> torch.Tensor:  # (..., queries, d_v)
-    """
-    Compute Scaled Dot-Product Attention.
-    """
-    scores = torch.matmul(Q, K.transpose(-2, -1))
-    dk = K.shape[-1]
-    scores_scaled = scores / (dk ** 0.5)
-
-    if mask is not None:
-        scores_scaled = scores_scaled.masked_fill(mask == 0, float('-inf'))
-
-    attention = softmax(scores_scaled, dim=-1)
-    output = torch.matmul(attention, V)
-    return output
-
-
-def rope(
-    d_k: int,
-    theta: float,
-    max_seq_len: int,
-    in_query_or_key: Float[torch.Tensor, " ... seq_len d_k"],
-    token_positions: Int[torch.Tensor, " ... seq_len"],
-) -> Float[torch.Tensor, " ... seq_len d_k"]:
-    """
-    Run RoPE for a given input tensor.
-    """
-    half_dim = d_k // 2
-    inv_freq = 1.0 / (theta ** (
-        torch.arange(0, half_dim, dtype=in_query_or_key.dtype, device=in_query_or_key.device) / half_dim
-    ))
-
-    angles = token_positions[..., None] * inv_freq[None, ...]
-    cos = angles.cos()
-    sin = angles.sin()
-
-    x1 = in_query_or_key[..., 0::2]
-    x2 = in_query_or_key[..., 1::2]
-
-    x_rotated_1 = x1 * cos - x2 * sin
-    x_rotated_2 = x1 * sin + x2 * cos
-
-    out = torch.empty_like(in_query_or_key)
-    out[..., 0::2] = x_rotated_1
-    out[..., 1::2] = x_rotated_2
-
-    return out
-
 class MultiHeadSelfAttentionWithRoPE(nn.Module):
     """
     Multi-Head Self-Attention module with Rotary Positional Embedding (RoPE).
     """
 
-    def __init__(self, d_model: int, num_heads: int, theta: float, max_seq_len: int, device=None, dtype=None):
+    def __init__(self, d_model: int, num_heads: int, theta: float, max_seq_len: int, device: torch.device | None = None, dtype=None):
         """
         Args:
             d_model (int): Embedding dimension.

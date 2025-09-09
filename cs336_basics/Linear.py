@@ -3,7 +3,7 @@ import torch.nn as nn
 from einops import einsum
 
 class Linear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, device = None, dtype = None):
+    def __init__(self, in_features: int, out_features: int, device: torch.device | None = None, dtype = None):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features

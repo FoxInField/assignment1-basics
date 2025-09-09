@@ -6,12 +6,12 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x) # sigmoid(x) = 1 / (1 + exp(-x))
 
 class SwiGLU_FFN(nn.Module):
-    def __init__(self, d_model: int, d_ff: int):
+    def __init__(self, d_model: int, d_ff: int, device: torch.device | None = None):
         super().__init__()
         # 三个线性层
-        self.w1 = Linear(d_model, d_ff)
-        self.w3 = Linear(d_model, d_ff)
-        self.w2 = Linear(d_ff, d_model)
+        self.w1 = Linear(d_model, d_ff, device = device)
+        self.w3 = Linear(d_model, d_ff, device = device)
+        self.w2 = Linear(d_ff, d_model, device = device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # SwiGLU 公式: out = (SiLU(x W1) * (x W3)) W2
