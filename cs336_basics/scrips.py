@@ -76,24 +76,55 @@ def preprocess(
     bpe_output_path: str,
     train_dataset_path: str,
     valid_dataset_path: str,
+    chunk_size: int = 1024 * 1024,  # 每次读取1MB
     **kwargs,
 ):
     # 训练词汇表
     tokenizer = train_volcabulary(txt_input_path, vocab_size, special_tokens, bpe_output_path)
 
-    # 将文本转化为npy格式
-    with open(txt_input_path, "r", encoding="utf-8") as f:
-        str = f.read()
-    encoded_str = tokenizer.encode(str)
-    data_array = numpy.array(encoded_str, dtype = numpy.int32)
-    numpy.save(train_dataset_path, data_array)
+    # 处理训练集 - 分批读取和编码
+    def process_large_file(file_path, output_path):
+        all_encoded = []
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            buffer = ""
+            while True:
+                # 分批读取
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                
+                buffer += chunk
+                
+                # 按行分割，处理完整的行
+                lines = buffer.split('\n')
+                # 保留最后不完整的行用于下一次读取
+                buffer = lines.pop() if lines else ""
+                
+                # 编码完整的行
+                for line in lines:
+                    if line.strip():  # 跳过空行
+                        encoded_line = tokenizer.encode(line + '\n')  # 加上换行符
+                        all_encoded.extend(encoded_line)
+        
+        # 处理缓冲区中剩余的内容
+        if buffer.strip():
+            encoded_buffer = tokenizer.encode(buffer)
+            all_encoded.extend(encoded_buffer)
+        
+        # 保存为numpy数组
+        data_array = numpy.array(all_encoded, dtype=numpy.int32)
+        numpy.save(output_path, data_array)
+        return len(all_encoded)
 
-    # 将文本转化为npy格式
-    with open(valid_txt_path, "r", encoding="utf-8") as f:
-        str = f.read()
-    encoded_str = tokenizer.encode(str)
-    data_array = numpy.array(encoded_str, dtype = numpy.int32)
-    numpy.save(valid_dataset_path, data_array)
+    # 处理训练集和验证集
+    print("处理训练集...")
+    train_token_count = process_large_file(txt_input_path, train_dataset_path)
+    print(f"训练集处理完成，共 {train_token_count} 个token")
+    
+    print("处理验证集...")
+    valid_token_count = process_large_file(valid_txt_path, valid_dataset_path)
+    print(f"验证集处理完成，共 {valid_token_count} 个token")
 
 def train(model: TransformerLM, optimizer: AdamW):
     # # 初始化wandb
@@ -107,16 +138,16 @@ def train(model: TransformerLM, optimizer: AdamW):
     #     }
     # )
 
-    # 预处理
-    preprocess(
-        txt_input_path = path_config["txt_input_path"], 
-        valid_txt_path = path_config["valid_txt_pash"],
-        vocab_size = model_config["vocab_size"], 
-        special_tokens = special_tokens, 
-        bpe_output_path = path_config["bpe_output_path"], 
-        train_dataset_path = path_config["train_dataset_path"],
-        valid_dataset_path = path_config["valid_dataset_path"]
-    )
+    # # 预处理
+    # preprocess(
+    #     txt_input_path = path_config["txt_input_path"], 
+    #     valid_txt_path = path_config["valid_txt_pash"],
+    #     vocab_size = model_config["vocab_size"], 
+    #     special_tokens = special_tokens, 
+    #     bpe_output_path = path_config["bpe_output_path"], 
+    #     train_dataset_path = path_config["train_dataset_path"],
+    #     valid_dataset_path = path_config["valid_dataset_path"]
+    # )
 
     train_dataset = numpy.load(path_config["train_dataset_path"], mmap_mode = "r+")
     validation_dataset = numpy.load(path_config["valid_dataset_path"], mmap_mode = "r+")
@@ -203,7 +234,14 @@ def train(model: TransformerLM, optimizer: AdamW):
     save_checkpoint(model = model, optimizer = optimizer, iteration = start_iter, out = path_config["checkpoint_load_path"])
     print(f"save checkpoint to {path_config['checkpoint_load_path']}")
 
-def generate_text(prompts: str, model: TransformerLM, optimizer: AdamW, max_length: int = 100, temperature: float = 1.0) -> str:
+def generate_text(
+    prompts: str, 
+    model: TransformerLM, 
+    optimizer: AdamW, 
+    max_length: int = 100, 
+    temperature: float = 1.0,
+    top_k: int = None  # 新增 top_k 参数
+) -> str:
     load_checkpoint(
         path_config["checkpoint_load_path"],
         model=model,
@@ -232,8 +270,18 @@ def generate_text(prompts: str, model: TransformerLM, optimizer: AdamW, max_leng
             # 应用softmax得到概率分布
             probs = softmax(next_token_logits, dim=-1)
             
-            # 从概率分布中采样下一个token
-            next_token_id = torch.multinomial(probs, num_samples=1).item()
+            # --- 新增 top-k 采样逻辑 ---
+            if top_k is not None:
+                # 获取top-k个概率最高的token和它们的索引
+                top_k_probs, top_k_indices = torch.topk(probs, k=top_k)
+                
+                # 从top-k中采样
+                next_token_id = torch.multinomial(top_k_probs, num_samples=1).item()
+                next_token_id = top_k_indices[next_token_id].item()
+            else:
+                # 原来的采样方式（从所有token中采样）
+                next_token_id = torch.multinomial(probs, num_samples=1).item()
+            # --- top-k 逻辑结束 ---
             
             # 将生成的token添加到序列中
             generated_ids.append(next_token_id)
@@ -242,7 +290,8 @@ def generate_text(prompts: str, model: TransformerLM, optimizer: AdamW, max_leng
             input_tensor = torch.tensor([generated_ids], dtype=torch.long, device=device)
             
             # 如果生成了结束符，停止生成
-            if next_token_id in tokenizer.encode("<|endoftext|>"):break
+            if next_token_id in tokenizer.encode("<|endoftext|>"):
+                break
 
     output = tokenizer.decode(generated_ids)
     return output
@@ -280,9 +329,42 @@ if __name__ == "__main__":
 
     # train(model=model, optimizer=optimizer)
 
-    prompts = "Hello, can you tell me a story?"
-    output = generate_text(prompts=prompts, model=model, optimizer=optimizer)
-    print(output)
+    # 适用于 TinyStories 风格模型的测试 prompts 列表
+    test_prompts = [
+        # 1. 基础故事生成 (Basic Story Generation)
+        "Hello, can you tell me a story?",
+        "Tell me a story about a cat and a dog.",
+        "Once upon a time, there was a little frog who was afraid of the water. One day...",
+        "Write a story about a big tree.",
+
+        # 2. 指令跟随与简单约束 (Instruction Following & Simple Constraints)
+        "Write a short story where a boy finds a big, red ball. Use the words 'sunny', 'happy', and 'park'.",
+        "Tell me a story about a robot, but the robot must be kind.",
+        "Make a story with a dog, a bone, and a friend.",
+        "Tell a story about a mouse. The story must have the word 'cheese' in it.",
+
+        # 3. 简单问答与理解 (Simple Q&A & Comprehension) - 需要先提供上下文
+        "Story: Tim the mouse found a shiny coin. He gave it to his friend Kim the bird. Kim was very happy. Question: Who found the coin?",
+        "Story: The little fox was sad. It lost its toy. Then it saw the toy under the bed. Question: Why was the fox happy at the end?",
+        "Story: Ben the bear ate too much honey. He got a tummy ache. Question: What should Ben not do next time?",
+
+        # 4. 基本因果与逻辑 (Basic Cause & Effect)
+        "Finish this story: The dog barked at the mailman. The mailman was scared. So he...",
+        "Why was the girl sad in the story? Because she...",
+        "What happened next? The boy planted a seed. He watered it every day. Then...",
+        "The sky got dark. The wind blew hard. What will happen next?",
+
+        # 5. 风格一致性 (Style Consistency)
+        "The bunny hopped to the tree. It saw a bright leaf. The leaf was gold. The bunny took the leaf home. Write another sentence that fits this story.",
+        "The cat sat on the mat. It was a soft mat. The sun was warm. Continue this story.",
+        "Add one more sentence to this story: 'The dog ran in the park. It found a big stick.'"
+    ]
+
+    # 示例使用方式：循环测试所有 prompts
+    for i, prompt in enumerate(test_prompts):
+        print(f"\n--- Test {i+1}: {prompt} ---")
+        output = generate_text(prompts=prompt, model=model, optimizer=optimizer, max_length=200, temperature=0.9, top_k=50)
+        print(f"Output: {output}")
     
     # 停止分析
     # pr.disable()  
